@@ -274,25 +274,25 @@ class Agent:
                     )
                 )
 
-        if arm == "collab":
-            third = self._pick_peer()
-            if third:
-                invite = self.bus.new_message(
-                    from_agent_id=self.cfg.agent_id,
-                    to_agent_id=third,
-                    kind="task_invite",
-                    conversation_id=msg.conversation_id,
-                    body={"task_id": task_id, "text": "Please contribute if you can."},
-                )
-                await self._send(invite)
-                # Record the invite so a later contribution from `third` can
-                # credit this agent's collab decision (ctx captured above).
-                self.task_manager.record_invite(
-                    task_id=task_id,
-                    inviter_id=self.cfg.agent_id,
-                    inviter_ctx=ctx,
-                    invited_id=third,
-                )
+            if arm == "collab":
+                third = self._pick_peer()
+                if third:
+                    invite = self.bus.new_message(
+                        from_agent_id=self.cfg.agent_id,
+                        to_agent_id=third,
+                        kind="task_invite",
+                        conversation_id=msg.conversation_id,
+                        body={"task_id": task_id, "text": "Please contribute if you can."},
+                    )
+                    await self._send(invite)
+                    # Record the invite so a later contribution from `third` can
+                    # credit this agent's collab decision (ctx captured above).
+                    self.task_manager.record_invite(
+                        task_id=task_id,
+                        inviter_id=self.cfg.agent_id,
+                        inviter_ctx=ctx,
+                        invited_id=third,
+                    )
 
     async def _handle_message(self, msg: Message):
         self.state.inbox_count += 1
