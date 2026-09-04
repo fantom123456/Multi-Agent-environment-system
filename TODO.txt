@@ -1,6 +1,14 @@
-is apparent that my bots have found a strategy that is working quite well and are becoming stuck on it and not learning anymore and are plateauing, and I know this because my bots have been performing
+in the next week or so:
+I want to change my new implementation of no RNG involved in the role selection for help in completing tasks to allowing them to select any bot of any role again and make them learn which roles are willing to help in the completion of tasks, and which bots are not willing to help.
+
+
+
+
+##is apparent that my bots have found a strategy that is working quite well and are becoming stuck on it and not learning anymore and are plateauing, and I know this because my bots have been performing
 too well for them to be learning, as their completion rate for tasks is 100%, and have high scores of 65-69 and very minimal failures such as almost always 0. This means either my tasks are too
 easy to complete for the bots, or they just aren't learning anymore.
 
-NEXT STEP
+##done
 Increase task difficulty and to add failure modes such as agents becoming unavailable and conflicting role requirements all of which I will implement over the next week or so
+
+
