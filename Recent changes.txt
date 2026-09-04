@@ -10,3 +10,8 @@ the final (Nth) contributor — a timing artifact, not a measure of who actually
 -Previously, an agent that chose to "collab" and invite a peer got no reward back based on whether that invite 
 actually helped. Now, if the invited peer goes on to contribute to the task, the inviter's original decision 
 gets a small direct reward — giving the system a counterfactual signal it didn't have before
+
+9/4/26
+-Made tasks harder to complete because agents were plateauing at a score of ~68, allowing for more failure, which stops the plateau and creates more room for improvement
+
+-Fixed an issue with new implementations that caused the tasks to be sent to any role, allowing for too much failure and making it a lot harder to train the bots, so I am changing to no more RNG involved in role selection to allow them to learn to actually complete the new tasks and learn.
