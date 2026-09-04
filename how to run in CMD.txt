@@ -1,0 +1,11 @@
+how to run in CMD
+
+cd C:\Users\Obob0\OneDrive\Desktop\Multi-Agent-environment-system-main\MultiAgentEnvironment_py_files
+python -m venv .venv
+.venv\Scripts\activate.bat
+pip install -r requirements.txt
+
+for /L %i in (1,1,10) do python orchestrator.py --agents 50 --duration 60 --seed %i --db runs.db --policy-db policy.db ( run 10 simulations)
+
+
+python learning_curve.py --db runs.db
