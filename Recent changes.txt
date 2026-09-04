@@ -15,3 +15,5 @@ gets a small direct reward — giving the system a counterfactual signal it didn
 -Made tasks harder to complete because agents were plateauing at a score of ~68, allowing for more failure, which stops the plateau and creates more room for improvement
 
 -Fixed an issue with new implementations that caused the tasks to be sent to any role, allowing for too much failure and making it a lot harder to train the bots, so I am changing to no more RNG involved in role selection to allow them to learn to actually complete the new tasks and learn.
+
+-Fixed an issue in the make_roles() function in orchestrator.py: assigned each of the 50 individual agents a unique string for their role, instead of spreading 10 unique strings for each role to all 50 agents, which was not technically a problem before because I had require_role_match set to False, but since it is now true, it restricts who is eligible to contribute.
