@@ -203,57 +203,58 @@ async def run_simulation(n_agents: int, duration_s: float, seed: int, db_path: s
 
             time_left = t.deadline_ts - time.time()
 
+            # --- EXPERIMENT: DISABLED ESCALATIONS ---
             # Escalation 1: notify a wider (but still limited) set of agents.
-            if (not st["extra_sent"]) and time_left <= 8.0:
-                st["extra_sent"] = True
-                extra = rng.sample(agent_ids, k=min(8, len(agent_ids)))
-                for to_aid in extra:
-                    msg = bus.new_message(
-                        from_agent_id="system",
-                        to_agent_id=to_aid,
-                        kind="task_request",
-                        body={
-                            "task_id": t.task_id,
-                            "deadline_ts": t.deadline_ts,
-                            "required_roles": t.required_roles,
-                            "required_contributions": t.required_contributions,
-                            "escalation": "extra",
-                        },
-                    )
-                    await bus.send(msg)
-
-                await telemetry.log(
-                    new_event(
-                        run_id=run_id,
-                        event_type="task_escalated",
-                        payload={"task_id": t.task_id, "level": "extra", "time_left_s": time_left},
-                    )
-                )
+            # if (not st["extra_sent"]) and time_left <= 8.0:
+            #     st["extra_sent"] = True
+            #     extra = rng.sample(agent_ids, k=min(8, len(agent_ids)))
+            #     for to_aid in extra:
+            #         msg = bus.new_message(
+            #             from_agent_id="system",
+            #             to_agent_id=to_aid,
+            #             kind="task_request",
+            #             body={
+            #                 "task_id": t.task_id,
+            #                 "deadline_ts": t.deadline_ts,
+            #                 "required_roles": t.required_roles,
+            #                 "required_contributions": t.required_contributions,
+            #                 "escalation": "extra",
+            #             },
+            #         )
+            #         await bus.send(msg)
+            # 
+            #     await telemetry.log(
+            #         new_event(
+            #             run_id=run_id,
+            #             event_type="task_escalated",
+            #             payload={"task_id": t.task_id, "level": "extra", "time_left_s": time_left},
+            #         )
+            #     )
 
             # Escalation 2: last resort — broadcast to everyone.
-            if (not st["broadcast_sent"]) and time_left <= 3.0:
-                st["broadcast_sent"] = True
-                msg = bus.new_message(
-                    from_agent_id="system",
-                    to_agent_id=None,
-                    kind="task_request",
-                    body={
-                        "task_id": t.task_id,
-                        "deadline_ts": t.deadline_ts,
-                        "required_roles": t.required_roles,
-                        "required_contributions": t.required_contributions,
-                        "escalation": "broadcast",
-                    },
-                )
-                await bus.send(msg)
-
-                await telemetry.log(
-                    new_event(
-                        run_id=run_id,
-                        event_type="task_escalated",
-                        payload={"task_id": t.task_id, "level": "broadcast", "time_left_s": time_left},
-                    )
-                )
+            # if (not st["broadcast_sent"]) and time_left <= 3.0:
+            #     st["broadcast_sent"] = True
+            #     msg = bus.new_message(
+            #         from_agent_id="system",
+            #         to_agent_id=None,
+            #         kind="task_request",
+            #         body={
+            #             "task_id": t.task_id,
+            #             "deadline_ts": t.deadline_ts,
+            #             "required_roles": t.required_roles,
+            #             "required_contributions": t.required_contributions,
+            #             "escalation": "broadcast",
+            #         },
+            #     )
+            #     await bus.send(msg)
+            # 
+            #     await telemetry.log(
+            #         new_event(
+            #             run_id=run_id,
+            #             event_type="task_escalated",
+            #             payload={"task_id": t.task_id, "level": "broadcast", "time_left_s": time_left},
+            #         )
+            #     )
 
         # --- fail any tasks that ran out the clock ---
         failed = tm.tick_deadlines()
