@@ -1,22 +1,6 @@
 """
 GlobalPolicy: a from-scratch LinUCB contextual bandit, shared across all
 agents, that decides how an agent reacts to a task message.
-
-Two independent decision points are modeled:
-  - "reactive"  {ignore, reply, collab}  <-- ACTIVE: used by Agent on every
-                                              task_request/task_invite.
-  - "proactive" {noop, ping, broadcast}  <-- RESERVED, NOT CURRENTLY USED.
-                                              Agent.run() disables proactive
-                                              behavior entirely (tasks-only
-                                              mode), so choose_proactive() /
-                                              update_proactive() are dead
-                                              code paths today. They're kept
-                                              here so a future proactive
-                                              mode (e.g. task discovery or
-                                              bidding) can be re-enabled
-                                              without redesigning the policy.
-
-Learned parameters persist to SQLite so training carries across runs.
 """
 
 import json
@@ -25,11 +9,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+import config
 
-# ---------------------------------------------------------------------------
-# Small dense linear-algebra helpers (feature vectors are low-dimensional,
-# so a hand-rolled implementation avoids adding a numpy dependency).
-# ---------------------------------------------------------------------------
 
 def dot(a: List[float], b: List[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
@@ -57,12 +38,10 @@ def identity(n: int) -> List[List[float]]:
 
 
 def invert_matrix(A: List[List[float]]) -> List[List[float]]:
-    """Dense Gauss-Jordan inverse. Fine for the small feature dimensions used here."""
     n = len(A)
-    aug = [A[i][:] + identity(n)[i][:] for i in range(n)]  # augmented [A | I]
+    aug = [A[i][:] + identity(n)[i][:] for i in range(n)]
 
     for col in range(n):
-        # partial pivot
         pivot = col
         for r in range(col, n):
             if abs(aug[r][col]) > abs(aug[pivot][col]):
@@ -72,12 +51,10 @@ def invert_matrix(A: List[List[float]]) -> List[List[float]]:
         if pivot != col:
             aug[col], aug[pivot] = aug[pivot], aug[col]
 
-        # normalize pivot row
         pv = aug[col][col]
         for j in range(2 * n):
             aug[col][j] /= pv
 
-        # eliminate other rows
         for r in range(n):
             if r == col:
                 continue
@@ -92,14 +69,6 @@ def invert_matrix(A: List[List[float]]) -> List[List[float]]:
 
 @dataclass
 class LinUCBArm:
-    """
-    One arm (action choice) of a LinUCB bandit.
-
-    Maintains A = lambda*I + sum(x x^T) and b = sum(r * x) so that the
-    ridge-regression estimate theta = A^-1 b gives the expected reward for
-    a feature vector x, plus an upper-confidence exploration bonus.
-    """
-
     d: int
     lam: float = 1.0
     A: List[List[float]] = None
@@ -114,7 +83,6 @@ class LinUCBArm:
             self.b = [0.0 for _ in range(self.d)]
 
     def score(self, x: List[float], alpha: float) -> float:
-        """UCB score = predicted reward (mu) + alpha * uncertainty (sigma)."""
         A_inv = invert_matrix(self.A)
         theta = mat_vec(A_inv, self.b)
         mu = dot(theta, x)
@@ -123,35 +91,26 @@ class LinUCBArm:
         return mu + alpha * sigma
 
     def update(self, x: List[float], r: float):
-        """Incorporate one observed (context, reward) pair."""
         self.A = mat_add(self.A, outer(x))
         self.b = vec_add(self.b, [r * xi for xi in x])
 
 
 class GlobalPolicy:
-    """
-    Global (shared, not per-agent) LinUCB policy covering two decision
-    points — see module docstring for which one is actually wired up.
-    Persisted to SQLite so learning carries across runs.
-    """
-
     def __init__(
         self,
         db_path: str = "policy.db",
-        alpha: float = 1.5,
-        lam: float = 1.0,
-        d: int = 8,
+        alpha: float = config.LINUCB_ALPHA,
+        lam: float = config.LINUCB_LAMBDA,
+        d: int = config.LINUCB_DIM,
     ):
         self.db_path = db_path
         self.alpha = alpha
         self.lam = lam
         self.d = d
 
-        # RESERVED / unused in tasks-only mode — see module docstring.
         self.proactive_arms: Dict[str, LinUCBArm] = {
             k: LinUCBArm(d=d, lam=lam) for k in ["noop", "ping", "broadcast"]
         }
-        # ACTIVE — this is the one Agent._handle_task_message() actually uses.
         self.reactive_arms: Dict[str, LinUCBArm] = {
             k: LinUCBArm(d=d, lam=lam) for k in ["ignore", "reply", "collab"]
         }
@@ -178,7 +137,6 @@ class GlobalPolicy:
         con.commit()
 
     def _load(self):
-        """Load persisted (A, b) for each arm, if present and dimension-compatible."""
         con = self._connect()
         self._init_db(con)
         cur = con.cursor()
@@ -193,7 +151,7 @@ class GlobalPolicy:
                     continue
                 A_json, b_json, d = row
                 if int(d) != self.d:
-                    continue  # dimension mismatch; ignore stale params
+                    continue
                 arm.A = json.loads(A_json)
                 arm.b = json.loads(b_json)
 
@@ -202,7 +160,6 @@ class GlobalPolicy:
         con.close()
 
     def save(self):
-        """Persist current (A, b) for every arm. Call at the end of a run."""
         con = self._connect()
         self._init_db(con)
         cur = con.cursor()
@@ -224,7 +181,6 @@ class GlobalPolicy:
         con.commit()
         con.close()
 
-    # -------- feature extraction --------
     def featurize(
         self,
         *,
@@ -234,15 +190,6 @@ class GlobalPolicy:
         seconds_since_proactive: float,
         last_msg_kind: str | None,
     ) -> List[float]:
-        """
-        Build the d=8 context vector shared by both decision points.
-
-        Note: `seconds_since_proactive` is always derived from a timestamp
-        that's never updated in tasks-only mode (proactive behavior is
-        disabled), so this feature is currently a near-constant. It's kept
-        so proactive mode can be re-enabled without changing the feature
-        schema (which would invalidate saved policy.db weights).
-        """
         ic = math.log1p(inbox_count)
         sc = math.log1p(sent_count)
         ka = math.log1p(known_agents)
@@ -255,24 +202,18 @@ class GlobalPolicy:
         bias = 1.0
         return [bias, ic, sc, ka, sp, kind_is_ping, kind_is_broadcast, kind_is_reply]
 
-    # -------- decisions --------
     def choose_proactive(self, x: List[float]) -> str:
-        """RESERVED / not currently called — see module docstring."""
         scored: List[Tuple[str, float]] = [(a, arm.score(x, self.alpha)) for a, arm in self.proactive_arms.items()]
         scored.sort(key=lambda t: t[1], reverse=True)
         return scored[0][0]
 
     def choose_reactive(self, x: List[float]) -> str:
-        """ACTIVE — picks ignore/reply/collab for a given context. Used by Agent."""
         scored: List[Tuple[str, float]] = [(a, arm.score(x, self.alpha)) for a, arm in self.reactive_arms.items()]
         scored.sort(key=lambda t: t[1], reverse=True)
         return scored[0][0]
 
-    # -------- learning --------
     def update_proactive(self, arm: str, x: List[float], reward: float):
-        """RESERVED / not currently called — see module docstring."""
         self.proactive_arms[arm].update(x, reward)
 
     def update_reactive(self, arm: str, x: List[float], reward: float):
-        """ACTIVE — called after every task-message reaction to assign credit."""
         self.reactive_arms[arm].update(x, reward)

@@ -1,6 +1,6 @@
 how to run in CMD
 
-cd C:\Users\Obob0\OneDrive\Desktop\Multi-Agent-environment-system-main\MultiAgentEnvironment_py_files
+cd C:\Users\Obob0\Documents\Multi-Agent-environment-system-main\MultiAgentEnvironment_py_files
 python -m venv .venv
 .venv\Scripts\activate.bat
 pip install -r requirements.txt

@@ -1,0 +1,170 @@
+# Project Writeup (Informal Draft)
+
+## Background
+
+My interest in this project actually comes from two pretty different places.
+The game theory side comes from video games — I've always been drawn to
+situations where individual decisions interact with what everyone else is
+doing, and where the "best" move depends on what you expect others to do.
+The swarm intelligence side comes from a video I saw of ants versus humans
+trying to fit an I-beam-shaped object through a narrow slot: the ants beat
+the humans at it, and that stuck with me. It's a simple demonstration of a
+decentralized group outperforming individually "smarter" agents just
+through how they coordinate, and I wanted to understand why and how that
+works.
+
+Coming into this project I had a decent Python background, but I didn't
+know much about contextual bandits or how to actually design reward
+systems for a multi-agent, game-theoretic setting. Learning both of those
+— what a contextual bandit actually is and does, and how reward design
+changes what a system learns to do — has been most of the technical
+learning curve so far.
+
+## Motivation
+
+Honestly, the straightforward answer is that I find this genuinely
+interesting, and I like the process of learning something, seeing
+progress, and debugging errors along the way — for me, debugging is part
+of how I can actually tell whether real learning (both the system's and my
+own) is happening, rather than just producing something that looks right
+on the surface.
+
+Beyond that, I want this to become something resume-worthy — a real
+artifact I can talk about in an interview, not just a class project — and
+I see it as a stepping stone toward a specific career direction I'm
+working towards. Ideally, the end result is a working, genuinely optimized
+system, not just something that runs.
+
+## The Core Problem
+
+Both of those interests — game theory and swarm coordination — pointed me
+toward the same kind of question, but "study swarm intelligence" on its
+own is too broad to actually investigate. It doesn't pin down a mechanism,
+a decision being made, or a way to measure success. The version of this
+that I think is actually answerable is narrower:
+
+> **Core problem:** In a decentralized system where independent agents
+> must choose whether to contribute to a shared task (a threshold-based
+> public-goods game — like the ants needing enough of them to move the
+> I-beam together), does the *design of the reward signal* — specifically,
+> how credit gets assigned when a group of agents jointly succeeds —
+> change whether a learning population discovers cooperative strategies
+> like recruiting help, versus just acting in its own immediate
+> self-interest?
+
+I scoped this down in three deliberate ways:
+
+1. **One game mechanic, not an open-ended environment.** The task
+   structure is simple and fixed: a quota of unique contributors has to be
+   reached before a deadline. This is a well-studied game-theoretic
+   structure (a threshold public-goods game), not a sprawling simulated
+   world with too many moving parts to draw a clean conclusion from.
+2. **One learning mechanism, not a comparison of algorithms.** Agents use
+   a single, well-understood learning method — a shared LinUCB contextual
+   bandit — rather than me trying to compare five different algorithms at
+   once. The reward signal is the variable I'm actually studying, not the
+   algorithm itself.
+3. **One specific, identified reward flaw — not "improve the reward
+   somehow."** The concrete question is whether fixing two credit-
+   assignment problems I found — an arbitrary "whoever happens to complete
+   the quota gets the entire bonus" rule, and zero reward for successfully
+   recruiting help — actually changes learned behavior. That's a
+   falsifiable, measurable question, not just a vague direction.
+
+## Why This Scope (Not Broader, Not Narrower)
+
+Going broader (a general "swarm intelligence" study) risks turning into a
+survey rather than an actual finding — there'd be too many free variables
+(agent count, environment design, learning algorithm, communication
+structure) to say anything clean about any one of them. Fixing the
+environment and the learning algorithm, and varying only the reward
+design, isolates a single factor I can actually test.
+
+Going narrower — say, a purely theoretical derivation of "fair" credit
+assignment on paper — would avoid the messiness of a live simulation, but
+it wouldn't test whether a *learning* system actually discovers the right
+behavior under real conditions: imperfect information, timing pressure,
+and the exploration/exploitation tradeoff. Keeping it empirical, using an
+actual running multi-agent simulation, keeps the project grounded in
+whether learning really happens, not just whether a fairer reward function
+can be defined in the abstract.
+
+In one line: fix the game and the learner, vary the reward, measure the
+behavior. Narrow enough to actually finish, broad enough to say something
+real about cooperation in decentralized systems.
+
+## Direction / Approach
+
+- **Environment:** a population of agents (currently 50) with shared
+  roles, who receive task notifications and choose to ignore, reply, or
+  recruit a peer ("collab") in response.
+- **Learning:** a single shared LinUCB contextual bandit. I chose this
+  over full reinforcement learning because reward in this environment is
+  close to immediate, and the multi-agent setting is non-stationary (every
+  agent is learning at the same time as every other agent) — conditions
+  where a bandit is more stable and sample-efficient than a bootstrapped
+  RL method, though it comes at the cost of not being able to plan over
+  long horizons.
+- **The reward intervention I'm actually studying:** a credit-assignment
+  redesign inspired by COMA (Counterfactual Multi-Agent Policy Gradients)
+  — not a full implementation of COMA's centralized critic, but borrowing
+  its core idea. Specifically: splitting the completion reward evenly
+  across every contributor instead of giving it entirely to whichever
+  agent happened to complete the quota last, and adding a reward for
+  recruitment that only pays off if the recruited peer actually helps.
+- **What "success" looks like for this project:** evidence, from comparing
+  runs under the old vs. new reward design, of whether recruitment
+  behavior is used more, is used more effectively, or leads to higher
+  task-completion rates — with a real explanation for *why*, tied
+  specifically to the credit-assignment mechanism, not just "the numbers
+  went up."
+- **Limitations I'm being upfront about from the start:** how an agent
+  picks who to recruit is currently a fixed rule (prefer a known peer
+  whose role matches), not itself learned yet — that's a planned next
+  step. The reward fix is COMA-*inspired*, not a full implementation.
+  Results so far come from dozens of simulation runs, not yet a
+  large-scale statistical sample.
+
+## Debugging as Part of the Process
+
+Since I mentioned that debugging is how I actually tell whether real
+learning is happening — both mine and the system's — here's a concrete
+example from this project so far. I originally had role-matching as
+optional (an agent's role only gave a reward bonus, it didn't restrict who
+could help). When I made role-matching strictly enforced, to make the task
+environment harder and more realistic, it exposed a bug that had been
+sitting there invisibly: role assignment had accidentally been giving
+almost every agent a unique role, meaning some tasks' quotas were
+mathematically impossible to reach no matter what any agent did.
+
+After fixing that, task completion jumped to 100% and recruitment usage
+dropped to zero — because it turned out the system was already notifying
+every eligible agent directly, so there was nothing left for recruitment
+to meaningfully do. That forced a second fix: deliberately under-notifying
+eligible agents, so that reaching the full quota actually depends on
+agents choosing to recruit each other.
+
+Neither of those was something I planned for in advance — I found both by
+running the simulation, looking at the results, and asking "why is this
+number what it is." That trial-and-error process is a big part of what
+I've actually learned so far, and I think it's worth including here rather
+than writing this up as if the design was right from the start.
+
+## Next Steps
+
+- Run a larger batch of simulations (aiming for dozens more runs) to get a
+  statistically stronger read on whether the new reward design actually
+  improves cooperative behavior over the old one.
+- Compare completion rates, recruitment usage, and the bandit's own
+  learned weights between the old and new reward schemes directly.
+- If time allows, extend recruitment from a fixed rule into something the
+  agents actually learn (i.e. who tends to be worth recruiting), which
+  would tie back more directly into the game-theoretic side of the
+  project.
+
+---
+
+*This is an early, informal draft meant to open a conversation, not a
+final writeup — happy to expand, restructure, or add more rigor to any
+section based on feedback.*
+

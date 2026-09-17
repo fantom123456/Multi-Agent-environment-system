@@ -1,30 +1,16 @@
 """
-Learning-curve view: lines up every run's task outcomes in chronological
-order so you can see at a glance whether performance is trending up, flat,
-or noisy across runs. This is the most direct way to answer "are my agents
-actually learning?" -- if the shared policy (policy.db) is genuinely
-improving, completion_rate and score should trend upward across successive
-runs that reuse the same policy.db.
-
-Usage: python learning_curve.py [--db runs.db] [--last N]
+Chronological learning curve view across simulation runs.
 """
 
 import argparse
 import sqlite3
-
-# Same weights as score_tasks.py, so the score column here is directly
-# comparable to that script's output.
-R_COMPLETE = 10.0
-R_PROGRESS = 0.2
-C_SEND = 0.02
-C_BCAST_EXTRA = 0.08
-P_FAIL = 5.0
+import config
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="runs.db")
-    ap.add_argument("--last", type=int, default=None, help="Only show the N most recent runs (default: all).")
+    ap.add_argument("--last", type=int, default=None, help="Only show the N most recent runs.")
     args = ap.parse_args()
 
     con = sqlite3.connect(args.db)
@@ -72,21 +58,15 @@ def main():
             (run_id,),
         ).fetchone()[0]
 
-        # Measured against every task that was actually spawned, not just
-        # ones that happened to resolve before the run ended -- a task
-        # spawned late in the run can outlive the run's duration and never
-        # get a task_completed/task_failed event at all. Counting only
-        # resolved tasks as the denominator would silently hide that and
-        # can make small samples look artificially like 100% success.
         unresolved = max(0, spawned - completed - failed)
         completion_pct = (100.0 * completed / spawned) if spawned else float("nan")
 
         score = (
-            R_COMPLETE * completed
-            - P_FAIL * failed
-            + R_PROGRESS * contrib
-            - C_SEND * sent
-            - C_BCAST_EXTRA * bcast
+            config.R_TASK_COMPLETE * completed
+            - config.P_FAIL * failed
+            + config.R_TASK_PROGRESS * contrib
+            - config.C_SEND * sent
+            - config.C_BROADCAST_EXTRA * bcast
         )
 
         completion_rates.append(completion_pct)
@@ -97,8 +77,6 @@ def main():
 
     con.close()
 
-    # A rough, honest signal only -- not a statistical test. Compares the
-    # average of the first half of runs to the second half.
     if len(scores) >= 4:
         mid = len(scores) // 2
         first_half_avg = sum(scores[:mid]) / mid
@@ -113,7 +91,7 @@ def main():
         else:
             print("-> No clear trend.")
     else:
-        print("\n(Run at least 4 simulations with the same --policy-db to get a first-half vs second-half comparison.)")
+        print("\n(Run at least 4 simulations with the same --policy-db to get a comparison.)")
 
 
 if __name__ == "__main__":

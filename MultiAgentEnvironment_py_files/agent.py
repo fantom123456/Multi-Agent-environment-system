@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import config
 from bus import InMemoryBus, Message
 from policy import GlobalPolicy
 from telemetry import Telemetry, new_event
@@ -15,12 +16,6 @@ class AgentConfig:
     agent_id: str
     role: str
     seed: int
-
-    # --- RESERVED for a future proactive-mode agent (currently unused) ---
-    # These are still populated by orchestrator.py for forward-compatibility,
-    # but nothing in this file reads them: proactive behavior is disabled
-    # (see Agent._maybe_proactive below), so an agent never decides on its
-    # own to ping or broadcast — it only reacts to incoming task messages.
     proactive_interval_s: float = 1.5
     broadcast_probability: float = 0.25
     reply_probability: float = 0.7
@@ -32,50 +27,11 @@ class AgentState:
     inbox_count: int = 0
     sent_count: int = 0
     known_agents: list[str] = field(default_factory=list)
-    # RESERVED: only meaningful once proactive mode is re-enabled — it never
-    # gets updated today, so `seconds_since_proactive` in featurize() is a
-    # near-constant (see Agent._features).
     last_proactive_ts: float = 0.0
     last_received_kind: Optional[str] = None
 
 
 class Agent:
-    """
-    Tasks-only agent.
-
-    Behavior:
-      - Only reacts to `task_request` / `task_invite` messages; every other
-        message kind is received (for telemetry) but otherwise ignored.
-      - Proactive behavior (an agent initiating a ping/broadcast on its own)
-        is disabled — tasks are always pushed by the orchestrator.
-      - On a task message, the shared LinUCB policy (`GlobalPolicy`) chooses
-        one of {ignore, reply, collab}, the agent attempts to contribute to
-        the task via `TaskManager`, and the outcome is turned into a reward
-        that's fed back into the policy.
-
-    Credit assignment (see tasks.py for the underlying bookkeeping):
-      - Per-contribution progress reward goes to whoever contributed, as before.
-      - Completion reward is split evenly across every contributor's own
-        decision context (fair for a quota-based task, where each of the
-        required contributors is equally pivotal), rather than all going to
-        whichever agent happened to complete the quota last.
-      - A "collab" invite's decision context gets a small counterfactual
-        bonus if the invited peer actually goes on to contribute -- giving
-        the recruiting decision credit for outcomes beyond the recruiter's
-        own immediate contribution.
-
-    RESERVED / not currently active:
-      - `proactive_interval_s` (constructor arg) and the proactive-mode
-        AgentConfig fields above are kept so a future "proactive" agent mode
-        (e.g. agents that bid on or discover tasks themselves) can reuse
-        this class without a redesign.
-      - `TASKS_ONLY` below is a documentation flag, not a live switch: the
-        "ignore anything that's not task-related" behavior in
-        `_handle_message` is hardcoded rather than gated by this attribute.
-        If you want it to actually toggle behavior, check `self.TASKS_ONLY`
-        in `_handle_message` instead of hardcoding the kind check.
-    """
-
     def __init__(
         self,
         run_id: str,
@@ -86,7 +42,7 @@ class Agent:
         all_agent_ids: list[str],
         policy: GlobalPolicy,
         all_agent_roles: Optional[dict[str, str]] = None,
-        proactive_interval_s: float = 1.0,  # RESERVED, unused — see class docstring
+        proactive_interval_s: float = 1.0,
         task_manager: Optional[TaskManager] = None,
     ):
         self.run_id = run_id
@@ -97,52 +53,29 @@ class Agent:
         self.policy = policy
         self.proactive_interval_s = proactive_interval_s
         self.task_manager = task_manager
-        # agent_id -> role, used by _pick_peer to invite role-eligible peers
-        # instead of a uniform-random guess. Empty dict is a safe fallback
-        # (peer selection just becomes uniform-random, as before).
         self.agent_roles: dict[str, str] = all_agent_roles or {}
 
         self.rng = random.Random(cfg.seed)
         self.state = AgentState(known_agents=[a for a in all_agent_ids if a != cfg.agent_id])
 
-        self._last_proactive_ctx: Optional[tuple[str, list[float]]] = None  # RESERVED, unused
-        self._last_reactive_ctx: Optional[tuple[str, list[float]]] = None   # ACTIVE
+        self._last_proactive_ctx: Optional[tuple[str, list[float]]] = None
+        self._last_reactive_ctx: Optional[tuple[str, list[float]]] = None
 
         self._stop = asyncio.Event()
 
-        # Reward shaping for task completion + anti-spam.
-        self.R_TASK_PROGRESS = 0.2
-        self.R_TASK_COMPLETE = 10.0
+        self.R_TASK_PROGRESS = config.R_TASK_PROGRESS
+        self.R_TASK_COMPLETE = config.R_TASK_COMPLETE
+        self.C_SEND = config.C_SEND
+        self.C_BROADCAST_EXTRA = config.C_BROADCAST_EXTRA
+        self.C_STEP = config.C_STEP
+        self.R_INVITE_SUCCESS = config.R_INVITE_SUCCESS
 
-        self.C_SEND = 0.02
-        self.C_BROADCAST_EXTRA = 0.08  # only applies if this agent ever sends a "broadcast"-kind message
-        self.C_STEP = 0.001
-
-        # Counterfactual recruitment credit: rewarded to a "collab" decision's
-        # own context if the peer it invited actually goes on to contribute.
-        # See tasks.py's Invite/record_invite for how this is tracked.
-        self.R_INVITE_SUCCESS = 1.0
-
-        # Documentation flag only — see class docstring. Not read anywhere.
         self.TASKS_ONLY = True
 
     async def stop(self):
         self._stop.set()
 
     def _pick_peer(self, required_roles: Optional[list[str]] = None) -> Optional[str]:
-        """
-        Choose a peer to invite via "collab".
-
-        If `required_roles` is given and this agent knows at least one peer
-        whose role matches, prefer inviting a matching peer -- this is
-        deterministic role-awareness, not learning: it doesn't get better
-        over time, it just stops "collab" from wasting invites on peers who
-        are guaranteed to be rejected under require_role_match=True.
-
-        Falls back to a uniform-random known peer if no role info is
-        available or no known peer matches (still better than nothing, even
-        if it may get rejected on arrival).
-        """
         if not self.state.known_agents:
             return None
 
@@ -173,16 +106,10 @@ class Agent:
         )
 
     def _apply_reward_to_last(self, reward: float):
-        """
-        Best-effort credit assignment: apply `reward` to whichever decision
-        this agent made most recently. In tasks-only mode `_last_reactive_ctx`
-        is always the one that's set — the proactive branch below is dead
-        code today but kept for when proactive mode returns.
-        """
         if self._last_reactive_ctx is not None:
             arm, x = self._last_reactive_ctx
             self.policy.update_reactive(arm, x, reward)
-        elif self._last_proactive_ctx is not None:  # RESERVED / currently unreachable
+        elif self._last_proactive_ctx is not None:
             arm, x = self._last_proactive_ctx
             self.policy.update_proactive(arm, x, reward)
 
@@ -210,7 +137,6 @@ class Agent:
         self._reward_send_cost(msg.kind)
 
     async def _handle_task_message(self, msg: Message):
-        """Core decision loop: choose ignore/reply/collab, act on it, and reward the outcome."""
         if self.task_manager is None:
             return
 
@@ -225,16 +151,11 @@ class Agent:
         ctx = (arm, x)
         self._last_reactive_ctx = ctx
 
-        # Small per-step cost, applied regardless of the chosen action, so the
-        # policy has a signal even when it chooses "ignore".
         self.policy.update_reactive(arm, x, -self.C_STEP)
 
         if arm == "ignore":
             return
 
-        # Attempt to contribute to the task (reply and collab both contribute;
-        # collab additionally recruits a peer below). `ctx` is passed through
-        # so TaskManager can hand back fair completion/invite credit later.
         outcome = self.task_manager.contribute(
             task_id=task_id,
             agent_id=self.cfg.agent_id,
@@ -260,11 +181,6 @@ class Agent:
                 )
             )
 
-            # Counterfactual recruitment credit: if this contribution fulfills
-            # a pending "collab" invite, reward the inviter's original
-            # decision context -- this is the signal a flat per-contribution
-            # reward can't capture (was the invite actually what caused this
-            # contribution to happen?).
             invite_credit = outcome.get("invite_credit")
             if invite_credit is not None:
                 inviter_arm, inviter_x = invite_credit
@@ -279,14 +195,6 @@ class Agent:
                 )
 
             if outcome.get("newly_completed"):
-                # Fair completion credit: split R_TASK_COMPLETE evenly across
-                # every contributor's own decision context, since in a
-                # quota-based task each contributor up to the threshold is
-                # equally pivotal (removing any one would have meant the task
-                # needed one more contributor). This replaces the old
-                # behavior of handing the entire bonus to whichever agent
-                # happened to be last -- a pure timing artifact, not a
-                # measure of who actually mattered.
                 required = outcome.get("required_contributions") or 1
                 share = self.R_TASK_COMPLETE / max(1, required)
                 for c_arm, c_x in outcome.get("contributor_contexts", []):
@@ -313,8 +221,6 @@ class Agent:
                     body={"task_id": task_id, "text": "Please contribute if you can."},
                 )
                 await self._send(invite)
-                # Record the invite so a later contribution from `third` can
-                # credit this agent's collab decision (ctx captured above).
                 self.task_manager.record_invite(
                     task_id=task_id,
                     inviter_id=self.cfg.agent_id,
@@ -339,24 +245,12 @@ class Agent:
             )
         )
 
-        # Tasks-only: everything except task_request/task_invite is logged
-        # above (for telemetry) and then ignored.
         if msg.kind not in ("task_request", "task_invite"):
             return
 
         await self._handle_task_message(msg)
 
     async def _maybe_proactive(self):
-        """
-        RESERVED extension point, currently a no-op.
-
-        Proactive behavior is disabled because tasks are always pushed by
-        the orchestrator. If you add agent-initiated behavior later (e.g.
-        an agent proactively asking around for open tasks, or bidding),
-        implement it here using `self.policy.choose_proactive(...)` and
-        record the choice in `self._last_proactive_ctx` so
-        `_apply_reward_to_last` can credit it.
-        """
         return
 
     async def run(self):

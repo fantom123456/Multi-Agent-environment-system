@@ -1,14 +1,10 @@
 """
-Task-based scoring: rewards task completions and progress contributions,
-penalizes failures and message volume (broadcasts extra). Weights mirror
-the reward shaping in Agent (see agent.py's R_TASK_* / C_* constants) so
-this should track what the policy is actually being trained to optimize.
-
-Usage: python score_tasks.py [--db runs.db] [--last N]
+Task-based scoring script matching live agent reward parameters.
 """
 
 import argparse
 import sqlite3
+import config
 
 
 def main():
@@ -31,13 +27,6 @@ def main():
     if args.last and len(runs) > args.last:
         runs = runs[-args.last:]
 
-    # Weights mirror Agent's reward shaping (agent.py).
-    R_COMPLETE = 10.0
-    R_PROGRESS = 0.2
-    C_SEND = 0.02
-    C_BCAST_EXTRA = 0.08
-    P_FAIL = 5.0
-
     print(f"Task-based score (last {args.last} runs):")
     for run_id, _ in runs:
         completed = cur.execute(
@@ -59,11 +48,11 @@ def main():
         ).fetchone()[0]
 
         score = (
-            R_COMPLETE * completed
-            - P_FAIL * failed
-            + R_PROGRESS * contrib
-            - C_SEND * sent
-            - C_BCAST_EXTRA * bcast
+            config.R_TASK_COMPLETE * completed
+            - config.P_FAIL * failed
+            + config.R_TASK_PROGRESS * contrib
+            - config.C_SEND * sent
+            - config.C_BROADCAST_EXTRA * bcast
         )
 
         print(f"\nrun_id: {run_id}")
