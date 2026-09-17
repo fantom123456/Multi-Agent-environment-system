@@ -8,7 +8,6 @@ import config
 from bus import InMemoryBus, Message
 from policy import GlobalPolicy
 from telemetry import Telemetry, new_event
-from tasks import TaskManager
 
 
 @dataclass
@@ -43,7 +42,6 @@ class Agent:
         policy: GlobalPolicy,
         all_agent_roles: Optional[dict[str, str]] = None,
         proactive_interval_s: float = 1.0,
-        task_manager: Optional[TaskManager] = None,
     ):
         self.run_id = run_id
         self.cfg = cfg
@@ -52,7 +50,6 @@ class Agent:
         self.telemetry = telemetry
         self.policy = policy
         self.proactive_interval_s = proactive_interval_s
-        self.task_manager = task_manager
         self.agent_roles: dict[str, str] = all_agent_roles or {}
 
         self.rng = random.Random(cfg.seed)
@@ -69,8 +66,6 @@ class Agent:
         self.C_BROADCAST_EXTRA = config.C_BROADCAST_EXTRA
         self.C_STEP = config.C_STEP
         self.R_INVITE_SUCCESS = config.R_INVITE_SUCCESS
-
-        self.TASKS_ONLY = True
 
     async def stop(self):
         self._stop.set()
@@ -137,9 +132,6 @@ class Agent:
         self._reward_send_cost(msg.kind)
 
     async def _handle_task_message(self, msg: Message):
-        if self.task_manager is None:
-            return
-
         task_id = msg.body.get("task_id")
         if not task_id:
             return
@@ -156,77 +148,42 @@ class Agent:
         if arm == "ignore":
             return
 
-        outcome = self.task_manager.contribute(
-            task_id=task_id,
-            agent_id=self.cfg.agent_id,
-            agent_role=self.cfg.role,
-            ctx=ctx,
+        # Explicit decoupled contribution intent sent over network
+        contrib_msg = self.bus.new_message(
+            from_agent_id=self.cfg.agent_id,
+            to_agent_id="system",
+            kind="task_contribute",
+            conversation_id=msg.conversation_id,
+            body={"task_id": task_id, "role": self.cfg.role, "ctx": ctx},
         )
-
-        if outcome.get("ok"):
-            r = self.R_TASK_PROGRESS * (2.0 if outcome.get("role_match") else 1.0)
-            self.policy.update_reactive(arm, x, r)
-
-            await self.telemetry.log(
-                new_event(
-                    run_id=self.run_id,
-                    event_type="task_contributed",
-                    agent_id=self.cfg.agent_id,
-                    payload={
-                        "task_id": task_id,
-                        "role": self.cfg.role,
-                        "role_match": outcome.get("role_match"),
-                        "remaining": outcome.get("remaining"),
-                    },
-                )
-            )
-
-            invite_credit = outcome.get("invite_credit")
-            if invite_credit is not None:
-                inviter_arm, inviter_x = invite_credit
-                self.policy.update_reactive(inviter_arm, inviter_x, self.R_INVITE_SUCCESS)
-                await self.telemetry.log(
-                    new_event(
-                        run_id=self.run_id,
-                        event_type="invite_credited",
-                        agent_id=self.cfg.agent_id,
-                        payload={"task_id": task_id},
-                    )
-                )
-
-            if outcome.get("newly_completed"):
-                required = outcome.get("required_contributions") or 1
-                share = self.R_TASK_COMPLETE / max(1, required)
-                for c_arm, c_x in outcome.get("contributor_contexts", []):
-                    self.policy.update_reactive(c_arm, c_x, share)
-
-                await self.telemetry.log(
-                    new_event(
-                        run_id=self.run_id,
-                        event_type="task_completed",
-                        payload={"task_id": task_id, "completed_by": self.cfg.agent_id},
-                    )
-                )
+        await self._send(contrib_msg)
 
         if arm == "collab":
-            task = self.task_manager.get(task_id)
-            required_roles = task.required_roles if task else None
-            third = self._pick_peer(required_roles)
+            req_roles = msg.body.get("required_roles")
+            third = self._pick_peer(req_roles)
             if third:
                 invite = self.bus.new_message(
                     from_agent_id=self.cfg.agent_id,
                     to_agent_id=third,
                     kind="task_invite",
                     conversation_id=msg.conversation_id,
-                    body={"task_id": task_id, "text": "Please contribute if you can."},
+                    body={
+                        "task_id": task_id,
+                        "required_roles": req_roles,
+                        "text": "Please contribute if you can.",
+                    },
                 )
                 await self._send(invite)
-                self.task_manager.record_invite(
-                    task_id=task_id,
-                    inviter_id=self.cfg.agent_id,
-                    inviter_ctx=ctx,
-                    invited_id=third,
+
+                # Record invite event across system bus
+                invite_rec = self.bus.new_message(
+                    from_agent_id=self.cfg.agent_id,
+                    to_agent_id="system",
+                    kind="task_invite_record",
+                    conversation_id=msg.conversation_id,
+                    body={"task_id": task_id, "invited_id": third, "ctx": ctx},
                 )
+                await self._send(invite_rec)
 
     async def _handle_message(self, msg: Message):
         self.state.inbox_count += 1
@@ -245,13 +202,32 @@ class Agent:
             )
         )
 
-        if msg.kind not in ("task_request", "task_invite"):
+        # Asynchronous acknowledgments and credits received over bus
+        if msg.kind == "task_contrib_ack":
+            arm, x = msg.body["ctx"]
+            self.policy.update_reactive(arm, x, msg.body["reward"])
             return
 
-        await self._handle_task_message(msg)
+        if msg.kind == "invite_credit_notice":
+            arm, x = msg.body["ctx"]
+            self.policy.update_reactive(arm, x, self.R_INVITE_SUCCESS)
+            await self.telemetry.log(
+                new_event(
+                    run_id=self.run_id,
+                    event_type="invite_credited",
+                    agent_id=self.cfg.agent_id,
+                    payload={"task_id": msg.body["task_id"]},
+                )
+            )
+            return
 
-    async def _maybe_proactive(self):
-        return
+        if msg.kind == "task_complete_notice":
+            arm, x = msg.body["ctx"]
+            self.policy.update_reactive(arm, x, msg.body["share"])
+            return
+
+        if msg.kind in ("task_request", "task_invite"):
+            await self._handle_task_message(msg)
 
     async def run(self):
         await self._log_agent_started()
@@ -262,8 +238,6 @@ class Agent:
                 await self._handle_message(msg)
             except asyncio.TimeoutError:
                 pass
-
-            await self._maybe_proactive()
 
         await self.telemetry.log(
             new_event(

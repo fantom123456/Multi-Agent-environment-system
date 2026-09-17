@@ -1,68 +1,54 @@
 import asyncio
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 
 @dataclass
 class Message:
-    """A single message passed between agents (or from the orchestrator/'system')."""
-
     message_id: str
-    conversation_id: str
     from_agent_id: str
-    to_agent_id: Optional[str]  # None means broadcast to every other agent
+    to_agent_id: str
     kind: str
-    body: Dict[str, Any]
+    conversation_id: str
+    body: Dict[str, Any] = field(default_factory=dict)
 
 
 class InMemoryBus:
-    """
-    Minimal async message bus.
-
-    Each agent gets its own asyncio.Queue (registered via `register_agent`).
-    `send()` either delivers to one agent (direct) or to everyone except the
-    sender (broadcast, when `to_agent_id` is None).
-    """
-
     def __init__(self):
-        self.queues: Dict[str, asyncio.Queue[Message]] = {}
+        self._inboxes: Dict[str, asyncio.Queue] = {}
 
     def register_agent(self, agent_id: str) -> asyncio.Queue:
-        """Create and return the inbox queue for a new agent."""
-        q: asyncio.Queue[Message] = asyncio.Queue()
-        self.queues[agent_id] = q
-        return q
+        if agent_id not in self._inboxes:
+            self._inboxes[agent_id] = asyncio.Queue()
+        return self._inboxes[agent_id]
 
-    def unregister_agent(self, agent_id: str):
-        """Remove an agent's inbox (e.g. on shutdown)."""
-        self.queues.pop(agent_id, None)
+    def register_system(self) -> asyncio.Queue:
+        return self.register_agent("system")
 
-    async def send(self, msg: Message):
-        """Route a message to its recipient, or to all agents if it's a broadcast."""
-        if msg.to_agent_id is None:
-            for aid, q in self.queues.items():
-                if aid != msg.from_agent_id:
-                    await q.put(msg)
-        else:
-            q = self.queues.get(msg.to_agent_id)
-            if q is not None:
-                await q.put(msg)
-
-    @staticmethod
     def new_message(
+        self,
         from_agent_id: str,
-        to_agent_id: Optional[str],
+        to_agent_id: str,
         kind: str,
-        body: Dict[str, Any],
         conversation_id: Optional[str] = None,
+        body: Optional[Dict[str, Any]] = None,
     ) -> Message:
-        """Convenience constructor that fills in message_id / conversation_id."""
         return Message(
             message_id=str(uuid.uuid4()),
-            conversation_id=conversation_id or str(uuid.uuid4()),
             from_agent_id=from_agent_id,
             to_agent_id=to_agent_id,
             kind=kind,
-            body=body,
+            conversation_id=conversation_id or str(uuid.uuid4()),
+            body=body or {},
         )
+
+    async def send(self, msg: Message):
+        if msg.to_agent_id == "*":
+            for aid, q in self._inboxes.items():
+                if aid not in (msg.from_agent_id, "system"):
+                    await q.put(msg)
+        else:
+            q = self._inboxes.get(msg.to_agent_id)
+            if q is not None:
+                await q.put(msg)

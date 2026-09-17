@@ -2,8 +2,8 @@ import argparse
 import asyncio
 import random
 import uuid
-import time
 
+import config
 from agent import Agent, AgentConfig
 from bus import InMemoryBus
 from policy import GlobalPolicy
@@ -27,6 +27,92 @@ def make_roles(n: int) -> list[str]:
     return [base[i % len(base)] for i in range(n)]
 
 
+async def system_bus_handler(
+    bus: InMemoryBus,
+    tm: TaskManager,
+    telemetry: Telemetry,
+    run_id: str,
+    stop_event: asyncio.Event,
+):
+    sys_inbox = bus.register_system()
+    while not stop_event.is_set():
+        try:
+            msg = await asyncio.wait_for(sys_inbox.get(), timeout=0.1)
+        except asyncio.TimeoutError:
+            continue
+
+        if msg.kind == "task_invite_record":
+            tm.record_invite(
+                task_id=msg.body["task_id"],
+                inviter_id=msg.from_agent_id,
+                inviter_ctx=msg.body["ctx"],
+                invited_id=msg.body["invited_id"],
+            )
+
+        elif msg.kind == "task_contribute":
+            task_id = msg.body["task_id"]
+            aid = msg.from_agent_id
+            role = msg.body["role"]
+            ctx = msg.body["ctx"]
+
+            outcome = tm.contribute(task_id, aid, role, ctx)
+            if outcome.get("ok"):
+                r = config.R_TASK_PROGRESS * (2.0 if outcome.get("role_match") else 1.0)
+                ack = bus.new_message(
+                    from_agent_id="system",
+                    to_agent_id=aid,
+                    kind="task_contrib_ack",
+                    conversation_id=msg.conversation_id,
+                    body={"reward": r, "ctx": ctx},
+                )
+                await bus.send(ack)
+
+                await telemetry.log(
+                    new_event(
+                        run_id=run_id,
+                        event_type="task_contributed",
+                        agent_id=aid,
+                        payload={
+                            "task_id": task_id,
+                            "role": role,
+                            "role_match": outcome.get("role_match"),
+                            "remaining": outcome.get("remaining"),
+                        },
+                    )
+                )
+
+                if outcome.get("invite_credit") is not None:
+                    inv_notice = bus.new_message(
+                        from_agent_id="system",
+                        to_agent_id=outcome["inviter_id"],
+                        kind="invite_credit_notice",
+                        conversation_id=msg.conversation_id,
+                        body={"task_id": task_id, "ctx": outcome["invite_credit"]},
+                    )
+                    await bus.send(inv_notice)
+
+                if outcome.get("newly_completed"):
+                    required = outcome.get("required_contributions") or 1
+                    share = config.R_TASK_COMPLETE / max(1, required)
+                    for contributor_id, c_ctx in outcome.get("contributor_contexts", []):
+                        comp_notice = bus.new_message(
+                            from_agent_id="system",
+                            to_agent_id=contributor_id,
+                            kind="task_complete_notice",
+                            conversation_id=msg.conversation_id,
+                            body={"task_id": task_id, "share": share, "ctx": c_ctx},
+                        )
+                        await bus.send(comp_notice)
+
+                    await telemetry.log(
+                        new_event(
+                            run_id=run_id,
+                            event_type="task_completed",
+                            payload={"task_id": task_id, "completed_by": aid},
+                        )
+                    )
+
+
 async def run_simulation(n_agents: int, duration_s: float, seed: int, db_path: str, policy_db: str):
     run_id = str(uuid.uuid4())
 
@@ -46,7 +132,7 @@ async def run_simulation(n_agents: int, duration_s: float, seed: int, db_path: s
                 "seed": seed,
                 "policy_db": policy_db,
                 "tasks_expected": 6,
-                "task_notify_mode": "no_escalation",
+                "task_notify_mode": "no_escalation_decoupled",
             },
         )
     )
@@ -76,8 +162,11 @@ async def run_simulation(n_agents: int, duration_s: float, seed: int, db_path: s
     )
     tm.start()
 
+    stop_system = asyncio.Event()
+    sys_task = asyncio.create_task(system_bus_handler(bus, tm, telemetry, run_id, stop_system))
+
     agents: list[Agent] = []
-    tasks: list[asyncio.Task] = []
+    agent_tasks: list[asyncio.Task] = []
 
     for i, aid in enumerate(agent_ids):
         inbox = bus.register_agent(aid)
@@ -99,12 +188,11 @@ async def run_simulation(n_agents: int, duration_s: float, seed: int, db_path: s
             all_agent_ids=agent_ids,
             all_agent_roles=agent_id_to_role,
             policy=policy,
-            task_manager=tm,
         )
         agents.append(agent)
 
     for agent in agents:
-        tasks.append(asyncio.create_task(agent.run()))
+        agent_tasks.append(asyncio.create_task(agent.run()))
 
     end_ts = asyncio.get_event_loop().time() + duration_s
     while asyncio.get_event_loop().time() < end_ts:
@@ -161,7 +249,10 @@ async def run_simulation(n_agents: int, duration_s: float, seed: int, db_path: s
     for agent in agents:
         await agent.stop()
 
-    await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.gather(*agent_tasks, return_exceptions=True)
+
+    stop_system.set()
+    await sys_task
 
     await telemetry.log(new_event(run_id=run_id, event_type="run_stopped"))
     await telemetry.flush()

@@ -35,3 +35,15 @@ gets a small direct reward — giving the system a counterfactual signal it didn
   * Verified over a 30-run sequence: communication stabilized at 45-70 sent messages per run, sustaining a consistent 50%-83% task completion rate.
 
 -Fixed a display bug in learning_curve.py that was printing duplicate rows per run.
+
+9/17/26
+9/17/26
+-Decoupled agent execution from direct environment state access to establish a fully decentralized communication protocol:
+  * Completely removed TaskManager references and direct method calls (contribute(), record_invite()) from Agent.
+  * Migrated task contributions and invite tracking to explicit asynchronous bus messages (task_contribute, task_invite_record) routed over InMemoryBus.
+  * Added a dedicated system bus listener in orchestrator.py to process inbound requests, evaluate deadlines/quotas, and dispatch acknowledgments (task_contrib_ack, invite_credit_notice, task_complete_notice) back to agents.
+  * Updated bus.py to support a centralized system queue interface.
+
+-Evaluated decentralized learning dynamics across an extended 30-run sequence:
+  * Confirmed strong learning progression, rising from an average score of 0.61 (first half) to 23.74 (second half), peaking at 100% completion and 63.36 net score.
+  * Observed emergent communication redundancy: under asynchronous propagation delays, agents compensated for latency by scaling message frequency (~140-200 sent per run) to guarantee quota fulfillment and avoid task failure penalties.
